@@ -20,6 +20,8 @@ $ mkdir build && cd build && cmake ..
 # cmake .. -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_SYSCONFDIR=/etc
 $ make
 $ sudo make install
+# Need msal for sasl-xoauth2-tool:
+$ sudo pip3 install msal
 ```
 
 ## Pre-Built Packages for Ubuntu
@@ -37,22 +39,26 @@ Install the plugin:
 $ sudo apt-get install sasl-xoauth2
 ```
 
-## Pre-Built Packages for RHEL/Fedora
+## Pre-Built Packages for RHEL/EPEL/Fedora
+
+The package is now available in latest Fedora and EPEL8/9. You can see how to enable epel here:
+
+https://docs.fedoraproject.org/en-US/epel/
+
+After that just install the plugin as any other package:
+
+```
+$ sudo dnf install sasl-xoauth2
+```
 
 (Thank you [@augustus-p](https://github.com/augustus-p) for confirming that
 this works!)
 
-Add the [sasl-xoauth2 Copr
+For older Fedora versions, you can use the [sasl-xoauth2 Copr
 repository](https://copr.fedorainfracloud.org/coprs/jjelen/sasl-xoauth2/):
 
 ```
 $ sudo dnf copr enable jjelen/sasl-xoauth2
-```
-
-Install the plugin:
-
-```
-$ sudo dnf install sasl-xoauth2
 ```
 
 ### A Note on SELinux
@@ -233,10 +239,10 @@ Gmail OAuth tokens. Run the script as follows:
 
 ```shell
 $ sasl-xoauth2-tool get-token gmail \
+    PATH_TO_TOKENS_FILE \
     --client-id=CLIENT_ID_FROM_SASL_XOAUTH2_CONF \
     --client-secret=CLIENT_SECRET_FROM_SASL_XOAUTH2_CONF \
-    --scope="https://mail.google.com/" \
-    PATH_TO_TOKENS_FILE
+    --scope="https://mail.google.com/"
 
 Please open this URL in a browser ON THIS HOST:
 
@@ -286,7 +292,100 @@ $ sudo chown -R postfix:postfix /var/spool/postfix/etc/tokens
 
 Skip to [restart Postfix](#restart-postfix) below.
 
-### Outlook/Office 365 Configuration
+### Outlook/Office 365 Configuration (Device Flow)
+
+As of sasl-xoauth2-0.23, this is the preferred method to authenticate with
+Outlook/Office, but the [fallback legacy client
+approach](#outlookoffice-365-configuration-legacy-client-deprecated) does still
+work (... for now).
+
+#### Client Credentials
+
+Follow [Microsoft's instructions to register an
+application](https://docs.microsoft.com/en-us/azure/active-directory/develop/quickstart-register-app#register-an-application),
+with some notes:
+
+* Use any name you like (it doesn't have to be "sasl-xoauth2").
+* Do **not** add any redirect URIs or set up any platform configurations.
+* You **must** toggle "Allow public client flows" to "yes".
+
+Then, add API permissions for `SMTP.Send`:
+
+1. From the app registration "API permissions" page, click "add a permission".
+1. Click "Microsoft Graph".
+1. Enter "SMTP.Send" in the search box.
+1. Expand the `SMTP` permission, then check the `SMTP.Send` checkbox.
+
+Store the "application (client) ID" (which you'll find in the "Overview" page
+for the application you registered with Azure) in `/etc/sasl-xoauth2.conf`.
+Leave `client_secret` blank. Additionally, explicitly set the token endpoint
+(`sasl-xoauth2` points to Gmail's token endpoint by default):
+
+```json
+{
+  "client_id": "client ID goes here",
+  "client_secret": "",
+  "token_endpoint": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+}
+```
+
+We'll also need these credentials in the next step.
+
+#### A Note on Token Endpoints
+
+The endpoint above
+(`https://login.microsoftonline.com/consumers/oauth2/v2.0/token`) is suitable
+for use with consumer Outlook accounts. For other types of accounts it may be
+necessary to replace `consumers` with `common`, `organizations`, or a specific
+tenant ID. See [Microsoft's OAuth protocol
+documentation](https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-v2-protocols#endpoints)
+for more on this.
+
+#### Initial Access Token
+
+The sasl-xoauth2 package includes a script that can assist in the generation of
+Microsoft OAuth tokens. Run the script as follows:
+
+```shell
+$ sasl-xoauth2-tool get-token outlook \
+    PATH_TO_TOKENS_FILE \
+    --client-id=CLIENT_ID_FROM_SASL_XOAUTH2_CONF \
+    --use-device-flow
+To sign in, use a web browser to open the page https://www.microsoft.com/link and enter the code REDACTED to authenticate.
+```
+
+If using a tenant other than `consumers`, pass `--tenant=common`,
+`--tenant=organizations`, or `--tenant=TENANT_ID`. The client ID will
+be the same one written to `/etc/sasl-xoauth2.conf`. And `PATH_TO_TOKENS_FILE`
+will be the file specified in `/etc/postfix/sasl_passwd`. In our example that
+file will be either `/etc/tokens/username@domain.com` or
+`/var/spool/postfix/etc/tokens/username@domain.com` (see [A Note on
+chroot](#a-note-on-chroot)).
+
+Visit the link in a browser, enter the code, then accept the various prompts.
+After authorizing the application, the tool will write a token to the path
+specified.
+
+```
+To sign in, use a web browser to open the page https://www.microsoft.com/link and enter the code REDACTED to authenticate.
+Acquired token.
+```
+
+It may be necessary to adjust permissions on the resulting token file so that
+Postfix (or, more accurately, sasl-xoauth2 running as the Postfix user) can
+update it:
+
+```
+$ sudo chown -R postfix:postfix /etc/tokens
+```
+
+or:
+
+```
+$ sudo chown -R postfix:postfix /var/spool/postfix/etc/tokens
+```
+
+### Outlook/Office 365 Configuration (Legacy Client) (Deprecated)
 
 #### Client Credentials
 
@@ -334,8 +433,9 @@ Microsoft OAuth tokens. Run the script as follows:
 
 ```shell
 $ sasl-xoauth2-tool get-token outlook \
-    --client-id=CLIENT_ID_FROM_SASL_XOAUTH2_CONF \
-    PATH_TO_TOKENS_FILE
+    PATH_TO_TOKENS_FILE \
+    --client-id=CLIENT_ID_FROM_SASL_XOAUTH2_CONF
+
 Please visit the following link in a web browser, then paste the resulting URL:
 
 https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id=REDACTED&response_type=code&redirect_uri=https%3A//login.microsoftonline.com/common/oauth2/nativeclient&response_mode=query&scope=openid%20offline_access%20https%3A//outlook.office.com/SMTP.Send
@@ -463,11 +563,14 @@ Token refresh succeeded.
 $ service postfix restart
 ```
 
-## Using Multiple Mail Providers Simultaneously
+## Using Multiple Mail Providers or Users Simultaneously
 
-One instance of sasl-xoauth2 may provide tokens for different mail providers,
-but each provider will require its own client ID, client secret, and token
-endpoint. In this case, each of these may be set in the token file rather than
+One instance of sasl-xoauth2 may provide tokens for different mail providers
+and/or users.
+Each provider will require its own client ID, client secret, and token
+endpoint. Each user may require a username to be specified, if the username
+automatically obtained from postfix is not correct.
+In this case, each of these may be set in the token file rather than
 in `/etc/sasl-xoauth2.conf`. Set them when setting the initial access token:
 
 ```json
@@ -477,11 +580,17 @@ in `/etc/sasl-xoauth2.conf`. Set them when setting the initial access token:
   "client_secret": "client secret goes here, if required",
   "token_endpoint": "token endpoint goes here, for non-Gmail",
   "expiry" : "0",
-  "refresh_token" : "refresh token goes here"
+  "refresh_token" : "refresh token goes here",
+  "user" : "username goes here"
 }
 ```
 
+`sasl-xoauth2-tool` has an argument `--overwrite-existing-token` to preserve the content of these additional fields
+when manually updating an expired or invalidated token.
+
 ## Debugging
+
+### Increasing Verbosity
 
 By default, sasl-xoauth2 will write to syslog if authentication fails. To
 disable this, set `log_to_syslog_on_failure` to `no` in
@@ -497,6 +606,17 @@ disable this, set `log_to_syslog_on_failure` to `no` in
 
 Conversely, to get more verbose logging when authentication fails, set
 `log_full_trace_on_failure` to `yes`.
+
+To get *even more* logging, set `always_log_to_syslog` to `yes` to have
+sasl-xoauth2 immediately and unconditionally write logs to syslog .
+
+### Postfix Logging
+
+It can be useful (thanks [@kpedro88](https://github.com/kpedro88)!) to increase
+Postfix's logging level, following the instructions
+[here](https://www.postfix.org/DEBUG_README.html#verbose).
+
+### SASL Mechanisms
 
 If Postfix complains about not finding a SASL mechanism (along the lines of
 `warning: SASL authentication failure: No worthy mechs found`), it's possible

@@ -7,6 +7,7 @@ import http
 import http.server
 import json
 import logging
+import msal
 import os
 import subprocess
 import sys
@@ -38,6 +39,14 @@ def url_safe_escape(instring:str) -> str:
     return urllib.parse.quote(instring, safe='~-._')
 
 
+def dump_overwrite(token:dict, output_filename:str, input_dict:dict):
+    # overwrite fields in previous token (represented by input_dict)
+    # that also have values from new token
+    input_dict.update(token)
+    with open(output_filename,'w') as output_file:
+        json.dump(input_dict, output_file, indent=4)
+
+
 def gmail_redirect_uri(local_port:int) -> str:
     return 'http://127.0.0.1:%d%s' % (local_port, GOOGLE_OAUTH2_RESULT_PATH)
 
@@ -62,7 +71,7 @@ def gmail_get_token_from_code(client_id:str, client_secret:str, authorization_co
     return json.loads(response)
 
 
-def gmail_get_RequestHandler(client_id:str, client_secret:str, output_file:IO[str]) -> type:
+def gmail_get_RequestHandler(client_id:str, client_secret:str, output_filename:str, input_dict:dict) -> type:
     class GMailRequestHandler(http.server.BaseHTTPRequestHandler):
         def log_request(self, code:Union[int,str]='-', size:Union[int,str]='-') -> None:
             # Silence request logging.
@@ -89,8 +98,7 @@ def gmail_get_RequestHandler(client_id:str, client_secret:str, output_file:IO[st
                     code,
                     self.server.server_address[1],
                 )
-                json.dump(token, output_file)
-                output_file.close()
+                dump_overwrite(token, output_filename, input_dict)
                 sys.exit(0)
 
         def ExtractCodeFromResponse(self) -> Optional[str]:
@@ -103,15 +111,16 @@ def gmail_get_RequestHandler(client_id:str, client_secret:str, output_file:IO[st
             if len(qs['code']) != 1:
                 return None
             return qs['code'][0]
-   
+
     return GMailRequestHandler
 
 
-def get_token_gmail(client_id:str, client_secret:str, scope:str, output_file:IO[str]) -> None:
+def get_token_gmail(client_id:str, client_secret:str, scope:str, output_filename:str, input_dict:dict) -> None:
     request_handler_class = gmail_get_RequestHandler(
         client_id,
         client_secret,
-        output_file,
+        output_filename,
+        input_dict,
     )
     server = http.server.HTTPServer(('', 0), request_handler_class)
     _, port = server.server_address
@@ -155,12 +164,12 @@ def outlook_get_initial_tokens(client_id:str, client_secret:str, tenant:str, cod
     url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
     token_request:Dict[str,str] = {}
     token_request['client_id'] = client_id
-    token_request['client_secret'] = client_secret
+    if len(client_secret) > 0:
+      token_request['client_secret'] = client_secret
     token_request['scope'] = OUTLOOK_SCOPE
     token_request['code'] = code
     token_request['redirect_uri'] = OUTLOOK_REDIRECT_URI
     token_request['grant_type'] = 'authorization_code'
-
     resp = urllib.request.urlopen(
         urllib.request.Request(
             url,
@@ -179,10 +188,32 @@ def outlook_get_initial_tokens(client_id:str, client_secret:str, tenant:str, cod
         raise Exception(f"Tokens not found in response: {content}")
 
 
-def get_token_outlook(client_id:str, client_secret:str, tenant:str, output_file:IO[str]) -> None:
-    code = outlook_get_authorization_code(client_id, tenant)
-    tokens = outlook_get_initial_tokens(client_id, client_secret, tenant, code)
-    json.dump(tokens, output_file, indent=4)
+def outlook_get_initial_tokens_by_device_flow(client_id:str, tenant:str) -> Dict[str,Union[str,int]]:
+    authority = f"https://login.microsoftonline.com/{tenant}"
+    app = msal.PublicClientApplication(client_id, authority=authority)
+    flow = app.initiate_device_flow([OUTLOOK_SCOPE])
+    if "user_code" not in flow:
+        raise Exception("Failed to create device flow. Ensure that public client flows are enabled for the application. Flow: %s" % json.dumps(flow, indent=4))
+    print(flow["message"])
+    sys.stdout.flush()
+    result = app.acquire_token_by_device_flow(flow)
+    if "access_token" not in result or "refresh_token" not in result:
+        raise Exception("Failed to acquire token. Result: %s" % json.dumps(result, indent=4))
+    print("Acquired token.")
+    return {
+        'access_token': result["access_token"],
+        'refresh_token': result["refresh_token"],
+        'expiry': 0,
+    }
+
+
+def get_token_outlook(client_id:str, client_secret:str, tenant:str, use_device_flow:bool, output_filename:str, input_dict:dict) -> None:
+    if use_device_flow:
+        tokens = outlook_get_initial_tokens_by_device_flow(client_id, tenant)
+    else:
+        code = outlook_get_authorization_code(client_id, tenant)
+        tokens = outlook_get_initial_tokens(client_id, client_secret, tenant, code)
+    dump_overwrite(tokens, output_filename, input_dict)
 
 ##########
 
@@ -191,21 +222,36 @@ parser = argparse.ArgumentParser()
 subparse = parser.add_subparsers()
 
 
+def argparse_get_parser() -> argparse.ArgumentParser:
+  return parser
+
+
 def subcommand_get_token(args:argparse.Namespace) -> None:
-    if not args.client_secret:
-        args.client_secret = input('Please enter OAuth2 client secret: ')
-    if not args.client_secret:
-        parser.error("fetching initial token requires 'client-secret' argument.")
+    input_dict = {}
+    if args.overwrite_existing_token:
+        if not os.path.isfile(args.output_file):
+            raise Exception("Cannot overwrite nonexistent token file {}".format(args.output_file))
+        else:
+            with open(args.output_file,'r') as input_file:
+                input_dict = json.load(input_file)
     if args.service == 'outlook':
         if not args.tenant:
             parser.error("'outlook' service requires 'tenant' argument.")
+        if not args.client_secret and not args.use_device_flow:
+            args.client_secret = input('Please enter OAuth2 client secret (not always required; Azure docs are unclear): ')
         get_token_outlook(
             args.client_id,
             args.client_secret,
             args.tenant,
+            args.use_device_flow,
             args.output_file,
+            input_dict,
         )
     elif args.service == 'gmail':
+        if not args.client_secret:
+            args.client_secret = input('Please enter OAuth2 client secret: ')
+        if not args.client_secret:
+            parser.error("'gmail' service requires 'client-secret' argument.")
         if not args.scope:
             parser.error("'gmail' service requires 'scope' argument.")
         get_token_gmail(
@@ -213,10 +259,11 @@ def subcommand_get_token(args:argparse.Namespace) -> None:
             args.client_secret,
             args.scope,
             args.output_file,
+            input_dict,
         )
 
 
-sp_get_token = subparse.add_parser('get-token')
+sp_get_token = subparse.add_parser('get-token', description='Fetches initial access and refresh tokens from an OAuth 2 provider')
 sp_get_token.set_defaults(func=subcommand_get_token)
 sp_get_token.add_argument(
     'service', choices=['outlook', 'gmail'],
@@ -239,7 +286,19 @@ sp_get_token.add_argument(
     help="required for 'gmail'",
 )
 sp_get_token.add_argument(
-    'output_file', nargs='?', type=argparse.FileType('w'), default='-',
+    "--use-device-flow",
+    default=False,
+    action='store_true',
+    help="use simplified device flow for Outlook/Azure",
+)
+sp_get_token.add_argument(
+    '--overwrite-existing-token',
+    default=False,
+    action='store_true',
+    help='overwrite existing token file (preserves extra fields)',
+)
+sp_get_token.add_argument(
+    'output_file', nargs='?', type=str, default='-',
     help="output file, '-' for stdout",
 )
 
@@ -252,7 +311,7 @@ def subcommand_test_config(args:argparse.Namespace) -> None:
   sys.exit(result.returncode)
 
 
-sp_test_config = subparse.add_parser('test-config')
+sp_test_config = subparse.add_parser('test-config', description='Tests a sasl-xoauth2 config file for syntax errors')
 sp_test_config.set_defaults(func=subcommand_test_config)
 sp_test_config.add_argument(
     '--config-file',
@@ -268,7 +327,7 @@ def subcommand_test_token_refresh(args:argparse.Namespace) -> None:
   sys.exit(result.returncode)
 
 
-sp_test_token_refresh = subparse.add_parser('test-token-refresh')
+sp_test_token_refresh = subparse.add_parser('test-token-refresh', description='Tests that a token can be refreshed (i.e., that the OAuth 2 flow is working correctly)')
 sp_test_token_refresh.set_defaults(func=subcommand_test_token_refresh)
 sp_test_token_refresh.add_argument(
     '--config-file',

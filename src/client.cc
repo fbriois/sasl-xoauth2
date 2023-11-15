@@ -133,16 +133,25 @@ int RequestPrompts(sasl_client_params_t *params, sasl_interact_t **prompts,
   return SASL_INTERACT;
 }
 
+Log::Options GetLogOptions() {
+  if (Config::Get()->always_log_to_syslog()) return Log::OPTIONS_IMMEDIATE;
+  if (Config::Get()->log_full_trace_on_failure())
+    return Log::OPTIONS_FULL_TRACE_ON_FAILURE;
+  return Log::OPTIONS_NONE;
+}
+
+Log::Target GetLogTarget() {
+  if (Config::Get()->always_log_to_syslog())
+    return Log::TARGET_SYSLOG;
+  if (!Config::Get()->log_to_syslog_on_failure())
+    return Log::TARGET_NONE;
+  return Log::TARGET_DEFAULT;
+}
+
 }  // namespace
 
 Client::Client() {
-  const Log::Options log_options = Config::Get()->log_full_trace_on_failure()
-                                       ? Log::OPTIONS_FULL_TRACE_ON_FAILURE
-                                       : Log::OPTIONS_NONE;
-  const Log::Target log_target = Config::Get()->log_to_syslog_on_failure()
-                                     ? Log::TARGET_DEFAULT
-                                     : Log::TARGET_NONE;
-  log_ = Log::Create(log_options, log_target);
+  log_ = Log::Create(GetLogOptions(), GetLogTarget());
   log_->Write("Client: created");
 }
 
@@ -216,6 +225,7 @@ int Client::InitialStep(sasl_client_params_t *params,
   user_ = auth_name;
   token_ = TokenStore::Create(log_.get(), password);
   if (!token_) return SASL_FAIL;
+  if (token_->has_user()) user_ = token_->user();
 
   err = SendToken(to_server, to_server_len);
   if (err != SASL_OK) return err;

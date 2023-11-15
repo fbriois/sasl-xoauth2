@@ -1,11 +1,48 @@
-[NOT YET RELEASED] sasl-xoauth2 (0.20) unstable; urgency=low
+sasl-xoauth2 (0.25) unstable; urgency=low [NOT YET RELEASED]
+
+  * Prevent truncation when writing logs.
+  * Allow token-level username overrides.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Tue, 18 Jul 2023 09:01:00 -0700
+
+sasl-xoauth2 (0.24) unstable; urgency=low
+
+  * Fix bug in logging code that resulted in missing messages (and the
+    occasional segfault).
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Mon, 17 Jul 2023 17:57:00 -0700
+
+sasl-xoauth2 (0.23) unstable; urgency=low
+
+  * Add new config option, "always_log_to_syslog", to unconditionally
+    log progress to syslog.
+  * Update sasl-xoauth2-tool to enable simplified device flow for
+    Outlook token acquisition.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Thu, 13 Jul 2023 16:17:00 -0700
+
+sasl-xoauth2 (0.22) unstable; urgency=low
+
+  * Update SASL plugin flags to indicate sasl-xoauth2 doesn't send
+    plaintext credentials.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Fri, 23 Jun 2023 08:07:00 -0700
+
+sasl-xoauth2 (0.21) unstable; urgency=low
+
+  * Update sasl-xoauth2-tool so that Outlook client secrets are optional.
+
+ -- Tarick Bedeir <tarick@bedeir.com>  Thu, 15 Jun 2023 15:23:00 -0700
+
+sasl-xoauth2 (0.20) unstable; urgency=low
 
   * Prompt for client secret when using sasl-xoauth2-tool, if it isn't
     specified as a command-line argument.
   * Update sasl-xoauth2-tool to pass a client secret when requesting an
     initial access token for Outlook.
+  * Man pages for sasl-xoauth2-tool, sasl-xoauth2.conf.
 
- -- Tarick Bedeir <tarick@bedeir.com>  Wed, 19 Apr 2023 18:41:00 -0700
+ -- Tarick Bedeir <tarick@bedeir.com>  Sun, 28 May 2023 09:09:00 -0700
 
 sasl-xoauth2 (0.19) unstable; urgency=low
 

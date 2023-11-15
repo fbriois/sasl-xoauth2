@@ -25,6 +25,14 @@ namespace sasl_xoauth2 {
 
 void EnableLoggingForTesting();
 
+// Log implementation interface, not for direct use.
+class LogImpl {
+ public:
+  virtual ~LogImpl() = default;
+
+  virtual void WriteLine(const std::string &line) = 0;
+};
+
 class Log {
  public:
   enum Options {
@@ -50,11 +58,14 @@ class Log {
   void Flush();
   void SetFlushOnDestroy();
 
- private:
-  Log(Options options, Target target) : options_(options), target_(target) {}
+ protected:
+  Log(std::unique_ptr<LogImpl> impl, Options options)
+      : impl_(std::move(impl)), options_(options) {}
 
-  Options options_ = OPTIONS_NONE;
-  const Target target_ = TARGET_DEFAULT;
+ private:
+  const std::unique_ptr<LogImpl> impl_;
+
+  Options options_;
   std::string summary_;
   std::vector<std::string> lines_;
 };

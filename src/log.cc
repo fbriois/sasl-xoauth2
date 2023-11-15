@@ -21,13 +21,67 @@
 #include <syslog.h>
 #include <time.h>
 
-#include "config.h"
+#include <memory>
 
 namespace sasl_xoauth2 {
 
 namespace {
+
 Log::Options s_default_options = Log::OPTIONS_NONE;
 Log::Target s_default_target = Log::TARGET_SYSLOG;
+
+std::string Now() {
+  time_t t = time(nullptr);
+  char time_str[32];
+  tm local_time = {};
+  localtime_r(&t, &local_time);
+  strftime(time_str, sizeof(time_str), "%F %T", &local_time);
+  return std::string(time_str);
+}
+
+class NoOpLogger : public LogImpl {
+ public:
+  NoOpLogger() = default;
+  ~NoOpLogger() override = default;
+
+  void WriteLine(const std::string &line) override {}
+};
+
+class SysLogLogger : public LogImpl {
+ public:
+  SysLogLogger() = default;
+  ~SysLogLogger() override = default;
+
+  void WriteLine(const std::string &line) override {
+    openlog("sasl-xoauth2", 0, 0);
+    syslog(LOG_WARNING, "%s\n", line.c_str());
+    closelog();
+  }
+};
+
+class StdErrLogger : public LogImpl {
+ public:
+  StdErrLogger() = default;
+  ~StdErrLogger() override = default;
+
+  void WriteLine(const std::string &line) override {
+    fprintf(stderr, "%s\n", line.c_str());
+  }
+};
+
+std::unique_ptr<LogImpl> CreateLogImpl(Log::Target target) {
+  switch (target) {
+    case Log::TARGET_NONE:
+      return std::make_unique<NoOpLogger>();
+    case Log::TARGET_SYSLOG:
+      return std::make_unique<SysLogLogger>();
+    case Log::TARGET_STDERR:
+      return std::make_unique<StdErrLogger>();
+    default:
+      exit(1);
+  };
+}
+
 }  // namespace
 
 void EnableLoggingForTesting() {
@@ -38,59 +92,45 @@ void EnableLoggingForTesting() {
 std::unique_ptr<Log> Log::Create(Options options, Target target) {
   options = static_cast<Options>(options | s_default_options);
   if (target == TARGET_DEFAULT) target = s_default_target;
-  return std::unique_ptr<Log>(new Log(options, target));
+  return std::unique_ptr<Log>(new Log(CreateLogImpl(target), options));
 }
 
 Log::~Log() {
-  if (options_ & OPTIONS_FLUSH_ON_DESTROY && !lines_.empty()) Flush();
+  if (options_ & OPTIONS_FLUSH_ON_DESTROY) Flush();
 }
 
 void Log::Write(const char *fmt, ...) {
-  time_t t = time(nullptr);
-  char time_str[32];
-  tm local_time = {};
-  localtime_r(&t, &local_time);
-  strftime(time_str, sizeof(time_str), "%F %T", &local_time);
-
-  char buf[1024];
   va_list args;
-  va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
-  lines_.push_back(std::string(time_str) + ": " + buf);
 
-  if (options_ & OPTIONS_IMMEDIATE && target_ == TARGET_STDERR) {
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
-    va_end(args);
+  va_start(args, fmt);
+  int buf_len = vsnprintf(nullptr, 0, fmt, args);
+  va_end(args);
+
+  // +1 for the trailing \0.
+  std::vector<char> buf(buf_len + 1);
+  va_start(args, fmt);
+  vsnprintf(buf.data(), buf.size(), fmt, args);
+  va_end(args);
+
+  const std::string line(buf.begin(), buf.end());
+  if (options_ & OPTIONS_IMMEDIATE) {
+    impl_->WriteLine(line);
+  } else {
+    lines_.push_back(Now() + ": " + line);
   }
 }
 
 void Log::Flush() {
-  if (target_ == TARGET_SYSLOG) {
-    openlog("sasl-xoauth2", 0, 0);
-    if (options_ & OPTIONS_FULL_TRACE_ON_FAILURE) {
-      syslog(LOG_WARNING, "auth failed:\n");
-      for (const auto &line : lines_)
-        syslog(LOG_WARNING, "  %s\n", line.c_str());
-    } else {
-      if (summary_.empty()) summary_ = lines_.back();
-      syslog(LOG_WARNING, "auth failed: %s\n", summary_.c_str());
-      if (lines_.size() > 1) {
-        syslog(LOG_WARNING,
-               "set log_full_trace_on_failure to see full %zu "
-               "line(s) of tracing.\n",
-               lines_.size());
-      }
-    }
-    closelog();
-  } else if (target_ == TARGET_STDERR) {
-    if (options_ & OPTIONS_IMMEDIATE) {
-      fprintf(stderr, "LOGGING: skipping write of %zu line(s).\n",
-              lines_.size());
-    } else {
-      for (const auto &line : lines_) fprintf(stderr, "%s\n", line.c_str());
+  if (lines_.empty()) return;
+  if (options_ & OPTIONS_FULL_TRACE_ON_FAILURE) {
+    impl_->WriteLine("auth failed:");
+    for (const auto &line : lines_) impl_->WriteLine("  " + line);
+  } else {
+    if (summary_.empty()) summary_ = lines_.back();
+    impl_->WriteLine("auth failed: " + summary_);
+    if (lines_.size() > 1) {
+      impl_->WriteLine("set log_full_trace_on_failure to see full " +
+                       std::to_string(lines_.size()) + " line(s) of tracing.");
     }
   }
 }
